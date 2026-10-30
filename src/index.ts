@@ -233,6 +233,34 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 	let lifecycleEpoch = 0;
 	/** A /clm-compact waiting for the agent to go idle; a second one is refused instead of racing it. */
 	let compactPending = false;
+	let lastAutoCompact = 0;
+	/** Video-Hack-Fix: NOTFALL-Auto-Compact. Lief budgetNotice in die Reserve-Schwelle,
+	 *  queued der Extension selbst einen /clm-compact-FollowUp — das Modell muss nicht
+	 *  mehr darauf hoffen, die Reminders freiwillig zu befolgen. Mindestabstand 10 min. */
+	function queueAutoCompact(ctx: { ui?: { notify(msg: string, level?: string): void } }, mirror: string | undefined, current: number | undefined, budget: number): void {
+		if (compactPending || Date.now() - lastAutoCompact < 10 * 60 * 1000) return;
+		lastAutoCompact = Date.now();
+		compactPending = true;
+		let template: string;
+		try {
+			template = loadCompactPrompt(settings.compactPrompt);
+		} catch (error) {
+			compactPending = false;
+			return;
+		}
+		const prompt = buildCompactPrompt(template, {
+			mirror: mirror ?? "",
+			current: current ?? 0,
+			budget,
+			instructions: "NOTFALL-AUTO-COMPACT: der Kontext hat die Reserve-Schwelle erreicht. Kompaktiere aggressiv, aber bewahre IDs, Pfade, Zahlen und laufende Jobs exakt. Falls der Backfill dies nicht erlaubt, kuerze bis unter die Haelfte des Budgets.",
+		});
+		try {
+			pi.sendUserMessage(prompt, { deliverAs: "followUp" });
+			ctx.ui?.notify?.("CLM AUTO-COMPACT: Reserve-Schwelle erreicht — Kompaktierungs-FollowUp gequeued.", "warning");
+		} catch {
+			compactPending = false;
+		}
+	}
 	let pendingNotice: string | undefined;
 	let mirrorMutationSeen = false;
 	let invalidationStreak = 0;
@@ -779,6 +807,9 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		projectionReplaced = false;
 		const tier = budgetTracker.observe(reading, budgetTiers(budgetPolicy, reading.budget, reading.reserve));
 		if (!tier) return undefined;
+		if (tier.label === "budget-reserve" && store?.filePath) {
+			queueAutoCompact(ctx, store.filePath, reading.observed ?? reading.estimated, reading.budget);
+		}
 		return budgetNoticeText(reading, tier, store?.filePath);
 	}
 
